@@ -32,8 +32,8 @@ class CasinoManager:
     SPIN_ANIMATION = ["🎰", "🎲", "🃏", "🎯", "🎪"]
 
     # Настройки
-    MIN_BET = 5
-    MAX_BET = 50
+    MIN_BET = 1  # Минимум 1 очко
+    MAX_BET = 999999  # Практически без лимита
     COOLDOWN_SECONDS = 30
 
     def __init__(self):
@@ -66,12 +66,7 @@ class CasinoManager:
             (корректна, сообщение_об_ошибке)
         """
         if bet < self.MIN_BET:
-            return False, f"⚠️ Минимальная ставка: {self.MIN_BET} очков!"
-
-        max_allowed = min(self.MAX_BET, int(user_rating * 0.5))
-
-        if bet > max_allowed:
-            return False, f"⚠️ Максимальная ставка: {max_allowed} очков (50% от твоего рейтинга)!"
+            return False, f"⚠️ Минимальная ставка: {self.MIN_BET} очко!"
 
         if bet > user_rating:
             return False, f"⚠️ У тебя недостаточно очков! Твой рейтинг: {user_rating}"
