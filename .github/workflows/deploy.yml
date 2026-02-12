@@ -1,0 +1,135 @@
+name: Deploy to VPS
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install sshpass
+      run: sudo apt-get update && sudo apt-get install -y sshpass
+
+    - name: Create deployment archive
+      run: |
+        tar -czf bot_deploy.tar.gz \
+          --exclude='.git' \
+          --exclude='.github' \
+          --exclude='*.tar.gz' \
+          --exclude='.env' \
+          --exclude='__pycache__' \
+          --exclude='*.pyc' \
+          --exclude='*.log' \
+          --exclude='.claude' \
+          .
+        echo "📦 Archive created"
+
+    - name: Upload to VPS
+      env:
+        VPS_HOST: ${{ secrets.VPS_HOST }}
+        VPS_USER: ${{ secrets.VPS_USER }}
+        VPS_PASSWORD: ${{ secrets.VPS_PASSWORD }}
+        BOT_DIR: ${{ secrets.BOT_DIR }}
+      run: |
+        sshpass -p "$VPS_PASSWORD" scp -o StrictHostKeyChecking=no \
+          bot_deploy.tar.gz $VPS_USER@$VPS_HOST:$BOT_DIR/
+        echo "📤 Files uploaded"
+
+    - name: Stop bot
+      env:
+        VPS_HOST: ${{ secrets.VPS_HOST }}
+        VPS_USER: ${{ secrets.VPS_USER }}
+        VPS_PASSWORD: ${{ secrets.VPS_PASSWORD }}
+        BOT_DIR: ${{ secrets.BOT_DIR }}
+      run: |
+        sshpass -p "$VPS_PASSWORD" ssh -o StrictHostKeyChecking=no $VPS_USER@$VPS_HOST \
+          "systemctl stop telegram-bot 2>/dev/null || pkill -f 'python3 bot.py' || true"
+        echo "🛑 Bot stopped"
+
+    - name: Create backup
+      env:
+        VPS_HOST: ${{ secrets.VPS_HOST }}
+        VPS_USER: ${{ secrets.VPS_USER }}
+        VPS_PASSWORD: ${{ secrets.VPS_PASSWORD }}
+        BOT_DIR: ${{ secrets.BOT_DIR }}
+      run: |
+        sshpass -p "$VPS_PASSWORD" ssh -o StrictHostKeyChecking=no $VPS_USER@$VPS_HOST \
+          "cd $BOT_DIR && mkdir -p backup_\$(date +%Y%m%d_%H%M%S) && cp *.py *.sh backup_\$(date +%Y%m%d_%H%M%S)/ 2>/dev/null || true"
+        echo "💾 Backup created"
+
+    - name: Extract and install
+      env:
+        VPS_HOST: ${{ secrets.VPS_HOST }}
+        VPS_USER: ${{ secrets.VPS_USER }}
+        VPS_PASSWORD: ${{ secrets.VPS_PASSWORD }}
+        BOT_DIR: ${{ secrets.BOT_DIR }}
+      run: |
+        sshpass -p "$VPS_PASSWORD" ssh -o StrictHostKeyChecking=no $VPS_USER@$VPS_HOST bash <<'EOF'
+        cd $BOT_DIR
+        tar -xzf bot_deploy.tar.gz
+        python3 -m py_compile bot.py
+        python3 -m py_compile persona.py
+        pip3 install -r requirements.txt --quiet
+        echo "📦 Files extracted and dependencies installed"
+        EOF
+
+    - name: Configure systemd service
+      env:
+        VPS_HOST: ${{ secrets.VPS_HOST }}
+        VPS_USER: ${{ secrets.VPS_USER }}
+        VPS_PASSWORD: ${{ secrets.VPS_PASSWORD }}
+        BOT_DIR: ${{ secrets.BOT_DIR }}
+      run: |
+        SERVICE_CONTENT="[Unit]
+        Description=Telegram Bot Chupapi
+        After=network.target
+
+        [Service]
+        Type=simple
+        User=root
+        WorkingDirectory=$BOT_DIR
+        ExecStart=/usr/bin/python3 $BOT_DIR/bot.py
+        Restart=always
+        RestartSec=10
+        StandardOutput=append:$BOT_DIR/bot.log
+        StandardError=append:$BOT_DIR/bot.log
+
+        [Install]
+        WantedBy=multi-user.target"
+
+        echo "$SERVICE_CONTENT" | sshpass -p "$VPS_PASSWORD" ssh -o StrictHostKeyChecking=no $VPS_USER@$VPS_HOST \
+          "cat > /etc/systemd/system/telegram-bot.service"
+        echo "⚙️  Systemd service configured"
+
+    - name: Start bot
+      env:
+        VPS_HOST: ${{ secrets.VPS_HOST }}
+        VPS_USER: ${{ secrets.VPS_USER }}
+        VPS_PASSWORD: ${{ secrets.VPS_PASSWORD }}
+      run: |
+        sshpass -p "$VPS_PASSWORD" ssh -o StrictHostKeyChecking=no $VPS_USER@$VPS_HOST bash <<'EOF'
+        systemctl daemon-reload
+        systemctl enable telegram-bot
+        systemctl start telegram-bot
+        sleep 3
+        if systemctl is-active --quiet telegram-bot; then
+          echo "✅ Bot deployed and running successfully!"
+          systemctl status telegram-bot --no-pager
+        else
+          echo "❌ Bot failed to start!"
+          journalctl -u telegram-bot -n 50 --no-pager
+          exit 1
+        fi
+        EOF
+
+    - name: Cleanup
+      if: always()
+      run: rm -f bot_deploy.tar.gz
