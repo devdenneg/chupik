@@ -20,7 +20,7 @@ jobs:
 
     - name: Create deployment archive
       run: |
-        tar -czf bot_deploy.tar.gz \
+        tar -czf /tmp/bot_deploy.tar.gz \
           --exclude='.git' \
           --exclude='.github' \
           --exclude='*.tar.gz' \
@@ -30,6 +30,7 @@ jobs:
           --exclude='*.log' \
           --exclude='.claude' \
           .
+        mv /tmp/bot_deploy.tar.gz .
         echo "📦 Archive created"
 
     - name: Upload to VPS
