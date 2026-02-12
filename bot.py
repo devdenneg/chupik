@@ -1805,9 +1805,6 @@ async def roulette_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_chat_allowed(chat_id):
         return
 
-    # Получаем текущий рейтинг для показа
-    user_rating = rating_manager.get_user_rating(chat_id, user_id)
-
     # Проверяем аргументы
     if not context.args:
         await update.message.reply_text(
@@ -1815,7 +1812,6 @@ async def roulette_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Использование: /roulette <ставка>\n"
             f"Минимальная ставка: {casino_manager.MIN_BET} очко\n"
             "Максимальная ставка: весь твой рейтинг!\n\n"
-            f"💰 <b>Твой рейтинг:</b> {user_rating} очков\n\n"
             "<b>Множители:</b>\n"
             "💥 x0 (проигрыш) - 40%\n"
             "🎉 x2 (удвоение) - 35%\n"
@@ -1833,6 +1829,9 @@ async def roulette_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text("⚠️ Укажи ставку числом! Например: /roulette 10")
         return
+
+    # Получаем текущий рейтинг
+    user_rating = rating_manager.get_user_rating(chat_id, user_id)
 
     if user_rating == 0:
         await update.message.reply_text(
