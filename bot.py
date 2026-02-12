@@ -35,6 +35,7 @@ from levels_manager import LevelsManager
 from achievements_manager import AchievementsManager
 from mood_manager import MoodManager
 from human_behavior import HumanBehavior
+from casino_manager import CasinoManager
 
 # Настройка логирования
 logging.basicConfig(
@@ -57,6 +58,7 @@ levels_manager = LevelsManager()
 achievements_manager = AchievementsManager()
 mood_manager = MoodManager()
 human_behavior = HumanBehavior()
+casino_manager = CasinoManager()
 
 
 # Система очередей для обработки запросов (чтобы не было багов при множественных запросах)
@@ -1794,6 +1796,103 @@ async def roast_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("😵 Что-то пошло не так, но знай - ты всё равно кринж! 😂")
 
 
+async def roulette_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Сыграть в рулетку"""
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    username = update.effective_user.username or update.effective_user.first_name or f"User_{user_id}"
+
+    if not is_chat_allowed(chat_id):
+        return
+
+    # Проверяем аргументы
+    if not context.args:
+        await update.message.reply_text(
+            "🎰 <b>Казино-рулетка</b>\n\n"
+            "Использование: /roulette <ставка>\n"
+            f"Минимальная ставка: {casino_manager.MIN_BET} очков\n"
+            f"Максимальная ставка: {casino_manager.MAX_BET} очков или 50% твоего рейтинга\n\n"
+            "<b>Множители:</b>\n"
+            "💥 x0 (проигрыш) - 40%\n"
+            "🎉 x2 (удвоение) - 35%\n"
+            "🔥 x3 (утроение) - 15%\n"
+            "💎 x5 - 7%\n"
+            "🌟 x10 - 3%\n\n"
+            "Посмотреть статистику: /casinostats",
+            parse_mode='HTML'
+        )
+        return
+
+    # Парсим ставку
+    try:
+        bet = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("⚠️ Укажи ставку числом! Например: /roulette 10")
+        return
+
+    # Получаем текущий рейтинг
+    user_rating = rating_manager.get_user_rating(chat_id, user_id)
+
+    if user_rating == 0:
+        await update.message.reply_text(
+            "😔 У тебя 0 очков рейтинга!\n"
+            "Сначала заработай очки, отправляя сообщения в чат."
+        )
+        return
+
+    # Играем!
+    success, multiplier, result, message = casino_manager.play(
+        chat_id, user_id, bet, user_rating
+    )
+
+    if not success:
+        # Ошибка (кулдаун, недостаточно очков и т.д.)
+        await update.message.reply_text(message, parse_mode='HTML')
+        return
+
+    # Обновляем рейтинг
+    rating_manager.add_rating(
+        chat_id, user_id, username,
+        points=result,
+        reason=f"Рулетка: ставка {bet}, множитель x{multiplier}"
+    )
+
+    new_rating = rating_manager.get_user_rating(chat_id, user_id)
+
+    # Формируем ответ с анимацией
+    animation = " ".join(casino_manager.SPIN_ANIMATION)
+    full_message = (
+        f"🎰 <b>РУЛЕТКА</b>\n\n"
+        f"👤 {username}\n"
+        f"💰 Ставка: <b>{bet}</b> очков\n\n"
+        f"{animation}\n\n"
+        f"{message}\n\n"
+        f"⭐ Новый рейтинг: <b>{new_rating}</b> очков"
+    )
+
+    await update.message.reply_text(full_message, parse_mode='HTML')
+
+    # Проверяем достижения
+    old_rating = new_rating - result
+    asyncio.create_task(check_and_unlock_achievements(
+        chat_id, user_id, username, old_rating, new_rating
+    ))
+
+
+async def casinostats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать статистику казино"""
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+
+    if not is_chat_allowed(chat_id):
+        return
+
+    stats = casino_manager.get_stats(chat_id, user_id)
+    message = casino_manager.format_stats(stats)
+
+    await update.message.reply_text(message, parse_mode='HTML')
+
+
 async def post_init(application: Application):
     """Действия после инициализации бота (регистрация команд)"""
     # Запускаем фоновую задачу проверки молчания (manual loop)
@@ -1817,6 +1916,8 @@ async def post_init(application: Application):
         BotCommand("rating", "Рейтинг пользователей 🏆"),
         BotCommand("level", "Мой уровень и прогресс 🎮"),
         BotCommand("achievements", "Мои достижения 🏅"),
+        BotCommand("roulette", "Казино-рулетка 🎰"),
+        BotCommand("casinostats", "Статистика казино 📊"),
         BotCommand("roast", "Подколоть 🔥"),
     ]
     await application.bot.set_my_commands(commands)
@@ -1877,6 +1978,9 @@ def main():
     application.add_handler(CommandHandler("level", level_command))
     application.add_handler(CommandHandler("achievements", achievements_command))
     application.add_handler(CommandHandler("roast", roast_command))
+    application.add_handler(CommandHandler("roulette", roulette_command))
+    application.add_handler(CommandHandler("casino", roulette_command))  # Алиас
+    application.add_handler(CommandHandler("casinostats", casinostats_command))
 
     # Обработчики callback'ов с фильтрами по паттернам
     application.add_handler(CallbackQueryHandler(roast_callback, pattern='^roast_'))
