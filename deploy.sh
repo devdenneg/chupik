@@ -9,11 +9,19 @@ RED='\033[0;31m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-# Переменные
-VPS_HOST="155.212.209.24"
-VPS_USER="root"
-VPS_PASSWORD="dftTjv&Y5t1U"
-BOT_DIR="/root/bot"
+# Переменные (используйте переменные окружения для безопасности)
+VPS_HOST="${VPS_HOST:-155.212.209.24}"
+VPS_USER="${VPS_USER:-root}"
+VPS_PASSWORD="${VPS_PASSWORD}"  # Устанавливается через: export VPS_PASSWORD="your_password"
+BOT_DIR="${BOT_DIR:-/root/bot}"
+
+# Проверка наличия пароля
+if [ -z "$VPS_PASSWORD" ]; then
+    echo -e "${RED}❌ Ошибка: VPS_PASSWORD не установлен!${NC}"
+    echo "Установите пароль: export VPS_PASSWORD='your_password'"
+    echo "Или используйте SSH ключ для автоматической авторизации"
+    exit 1
+fi
 
 echo -e "${YELLOW}1. Подключение к VPS...${NC}"
 

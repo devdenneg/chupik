@@ -997,9 +997,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Варианты обращения к боту
     bot_names = ['чупапи', 'чупа', 'чупик']
 
-    # 1. В личке - всегда отвечаем
+    # 1. В личке - отвечаем только @godstress
     if chat_type == 'private':
-        should_respond = True
+        if user.username and user.username.lower() == 'godstress':
+            should_respond = True
+        else:
+            # Отправляем сообщение что общаться можно только в группе
+            await message.reply_text(
+                "Йоу! Я тут только в группах общаюсь 😎\n"
+                "Добавь меня в беседу и там поболтаем!"
+            )
+            return
 
     # 2. Упоминание через @username
     elif context.bot.username and f"@{context.bot.username}" in text_lower:
@@ -1018,8 +1026,40 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif message.reply_to_message and message.reply_to_message.from_user.id == context.bot.id:
         should_respond = True
 
-    # Если не нужно отвечать, просто выходим (но сообщение уже в истории)
+    # Если не нужно отвечать напрямую, есть шанс случайно отреагировать
     if not should_respond:
+        # В группах бот иногда реагирует на сообщения (15% шанс)
+        if chat_type in ['group', 'supergroup'] and random.random() < 0.15:
+            # Проверяем что сообщение достаточно содержательное (не короткое)
+            if len(user_text.split()) >= 5:
+                # Небольшая пауза перед реакцией (от 3 до 8 секунд)
+                await asyncio.sleep(random.uniform(3, 8))
+
+                # Анализируем настроение сообщения и реагируем
+                await message.chat.send_action('typing')
+
+                # Используем небольшую задержку для имитации "думания"
+                pause_duration = await human_behavior.calculate_response_time(user_text)
+                await asyncio.sleep(pause_duration)
+
+                # Генерируем короткую реакцию через GLM
+                recent_history = history_manager.get_history(chat_id, limit=5)
+                messages = [{"role": "system", "content": SYSTEM_PERSONA + "\n\nТы случайно услышал разговор в чате и хочешь коротко прокомментировать или вставить свое слово. Будь естественным, дерзким и уместным. Ответь ОЧЕНЬ коротко (5-15 слов максимум), как будто просто вставляешь реплику в разговор."}]
+
+                for msg in recent_history:
+                    messages.append({"role": msg["role"], "content": msg["content"]})
+
+                try:
+                    response = await glm_client.chat_completion(messages, max_tokens=50, temperature=0.9)
+                    if response:
+                        # Применяем человеческое поведение к реакции
+                        response = await human_behavior.apply_human_behavior(response, mood_manager.get_current_mood())
+
+                        await message.reply_text(response)
+                        history_manager.add_message(chat_id, "assistant", response, "Chupapi")
+                        logger.info(f"Random reaction in chat {chat_id}: {response[:50]}...")
+                except Exception as e:
+                    logger.error(f"Error generating random reaction: {e}")
         return
 
     if not user_text:
@@ -1382,11 +1422,20 @@ async def morning_greeting_scheduler(application: Application):
             logger.info(f"Next morning greeting at: {next_morning} (in {sleep_seconds:.0f} seconds)")
             await asyncio.sleep(sleep_seconds)
 
-            # Отправляем приветствие во все активные чаты
+            # Отправляем приветствие только в группы (не в личные сообщения)
             for chat_id_str in list(history_manager.chats.keys()):
                 chat_id = int(chat_id_str)
 
                 if not is_chat_allowed(chat_id):
+                    continue
+
+                # Проверяем тип чата - отправляем только в группы
+                try:
+                    chat = await application.bot.get_chat(chat_id)
+                    if chat.type == 'private':
+                        continue  # Пропускаем личные чаты
+                except Exception as e:
+                    logger.warning(f"Could not get chat info for {chat_id}: {e}")
                     continue
 
                 # Генерируем утреннее приветствие через GLM в стиле Чупапи
@@ -1434,11 +1483,20 @@ async def daily_stats_scheduler(application: Application):
             logger.info(f"Next daily stats send at: {next_midnight} (in {sleep_seconds:.0f} seconds)")
             await asyncio.sleep(sleep_seconds)
 
-            # Отправляем статистику во все активные чаты
+            # Отправляем статистику только в группы (не в личные сообщения)
             for chat_id_str in list(history_manager.chats.keys()):
                 chat_id = int(chat_id_str)
 
                 if not is_chat_allowed(chat_id):
+                    continue
+
+                # Проверяем тип чата - отправляем только в группы
+                try:
+                    chat = await application.bot.get_chat(chat_id)
+                    if chat.type == 'private':
+                        continue  # Пропускаем личные чаты
+                except Exception as e:
+                    logger.warning(f"Could not get chat info for {chat_id}: {e}")
                     continue
 
                 stats = daily_stats.get_today_stats(chat_id)
