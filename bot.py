@@ -64,7 +64,7 @@ chat_locks = defaultdict(asyncio.Lock)
 chat_queues = defaultdict(asyncio.Queue)
 
 # Рейтинг-система: каждый пользователь может получить очки независимо
-# Нет cooldown - каждое сообщение имеет 40% шанс на +1 очко
+# Нет cooldown - каждое сообщение имеет 25% шанс на рандомное количество очков (1-25)
 
 # Используем персону из файла persona.py
 SYSTEM_PROMPT = SYSTEM_PERSONA
@@ -765,30 +765,34 @@ async def check_rating_request(update: Update, user_text: str, chat_id: int, use
 async def evaluate_message(update: Update, user_text: str, username: str, chat_id: int, user_id: int):
     """
     Простая вероятностная система рейтинга.
-    Каждое сообщение имеет 40% шанс получить +1 очко.
+    Каждое сообщение имеет 25% шанс получить от 1 до 25 очков.
     Без использования AI.
     """
     try:
         logger.info(f"[RATING] Processing message from {username} (user_id={user_id}) in chat {chat_id}")
 
-        # Проверяем 40% вероятность
+        # Проверяем 25% вероятность
         rand_value = random.random()
-        logger.info(f"[RATING] Random check: {rand_value:.4f} < 0.40? {rand_value < 0.40}")
+        logger.info(f"[RATING] Random check: {rand_value:.4f} < 0.25? {rand_value < 0.25}")
 
-        if rand_value < 0.40:
-            # Награждаем +1 очко
-            logger.info(f"[RATING] 40% check PASSED - granting 1 point!")
+        if rand_value < 0.25:
+            # Награждаем случайным количеством очков от 1 до 25
+            points = random.randint(1, 25)
+            logger.info(f"[RATING] 25% check PASSED - granting {points} points!")
 
             rating_manager.add_rating(
                 chat_id, user_id, username,
-                points=1,
-                reason="Удачный бросок 🎲"
+                points=points,
+                reason=f"Удачный бросок 🎲 (+{points})"
             )
-            daily_stats.add_rating_points(chat_id, 1)
+            daily_stats.add_rating_points(chat_id, points)
 
             # Отправляем публичное сообщение о начисленных очках
             new_rating = rating_manager.get_user_rating(chat_id, user_id)
-            announcement = f"🎉 <b>{username}</b> получил <b>+1 очко</b>!\n⭐ Новый рейтинг: <b>{new_rating}</b> очков"
+
+            # Разные эмодзи в зависимости от количества очков
+            emoji = "🎉" if points <= 10 else "🔥" if points <= 20 else "💎"
+            announcement = f"{emoji} <b>{username}</b> получил <b>+{points} очков</b>!\n⭐ Новый рейтинг: <b>{new_rating}</b> очков"
 
             try:
                 await update.message.chat.send_message(announcement, parse_mode='HTML')
@@ -796,12 +800,12 @@ async def evaluate_message(update: Update, user_text: str, username: str, chat_i
                 logger.warning(f"[RATING] Could not send rating announcement: {e}")
 
             # Проверяем ачивки
-            old_rating = new_rating - 1
+            old_rating = new_rating - points
             asyncio.create_task(check_and_unlock_achievements(
                 chat_id, user_id, username, old_rating, new_rating
             ))
         else:
-            logger.info(f"[RATING] 40% check failed - no points this time")
+            logger.info(f"[RATING] 25% check failed - no points this time")
 
     except Exception as e:
         logger.error(f"[RATING] Error: {e}", exc_info=True)
@@ -981,7 +985,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     daily_stats.add_message(chat_id)
     await auto_learn_facts(message, user_text)
 
-    # Анализируем сообщение для рейтинга - простая 40% вероятность без API
+    # Анализируем сообщение для рейтинга - простая 25% вероятность без API
     asyncio.create_task(evaluate_message(update, user_text, username, chat_id, user.id))
 
     # Проверяем просьбы о начислении очков (не блокирует дальнейший ответ)
