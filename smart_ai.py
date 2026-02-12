@@ -103,9 +103,97 @@ class SmartLocalAI:
                 persona_desc = match.group(1).strip()
                 # Игнорируем слишком короткие или чисто пустые
                 if len(persona_desc) > 2:
-                    return persona_desc, False
-                    
+                    return persona_desc, False                    
         return None, False
+
+    def detect_behavioral_instruction(self, text: str) -> Optional[str]:
+        """
+        Определить, содержит ли сообщение поведенческую инструкцию для бота.
+        Возвращает текст инструкции или None.
+        
+        Примеры:
+        - "начинай говорить со слов Абудаби"
+        - "всегда добавляй эмодзи в конце"
+        - "отвечай только короткими фразами"
+        """
+        text = text.lower().strip()
+        
+        # Паттерны поведенческих инструкций
+        instruction_patterns = [
+            r'начинай\s+(?:говорить|сообщения|ответы|отвечать)\s+(?:со\s+слов?|с)\s+["\']?(.+?)["\']?$',
+            r'начинай\s+(?:говорить|сообщения|ответы|отвечать)\s+(?:со\s+слов?|с)\s+(.+)',
+            r'всегда\s+(?:говори|пиши|добавляй|используй|начинай)\s+(.+)',
+            r'каждый\s+(?:раз|ответ)\s+(?:говори|пиши|добавляй|начинай)\s+(.+)',
+            r'отвечай\s+(?:только|всегда)\s+(.+)',
+            r'(?:говори|пиши)\s+(?:только|всегда)\s+(.+)',
+            r'заканчивай\s+(?:сообщения|ответы)\s+(.+)',
+            r'добавляй\s+в\s+(?:конец|начало)\s+(.+)',
+        ]
+        
+        for pattern in instruction_patterns:
+            match = re.search(pattern, text)
+            if match:
+                instruction = match.group(1).strip()
+                # Игнорируем слишком короткие или пустые инструкции
+                if len(instruction) > 2:
+                    # Формируем полную инструкцию из оригинального текста
+                    # Убираем обращение к боту
+                    clean_text = re.sub(r'^(?:чупапи|чупа|чупик)[,\s]*', '', text, flags=re.IGNORECASE).strip()
+                    return clean_text
+                    
+        return None
+
+    def detect_reminder_request(self, text: str) -> Optional[Dict]:
+        """
+        Определить, содержит ли сообщение запрос на напоминание.
+        Возвращает словарь с временем и текстом напоминания или None.
+        
+        Примеры:
+        - "напомни через 15 секунд"
+        - "напомни через 5 минут про встречу"
+        - "через час напомни позвонить"
+        """
+        text = text.lower().strip()
+        
+        # Паттерны для напоминаний
+        reminder_patterns = [
+            r'напомни\s+через\s+(\d+)\s+(секунд|сек|минут|мин|час|часа|часов)(?:\s+(.+))?',
+            r'через\s+(\d+)\s+(секунд|сек|минут|мин|час|часа|часов)\s+напомни(?:\s+(.+))?',
+            r'поставь\s+напоминание\s+на\s+(\d+)\s+(секунд|сек|минут|мин|час|часа|часов)(?:\s+(.+))?',
+        ]
+        
+        for pattern in reminder_patterns:
+            match = re.search(pattern, text)
+            if match:
+                amount = int(match.group(1))
+                unit = match.group(2)
+                reminder_text = match.group(3) if len(match.groups()) >= 3 else None
+                
+                # Конвертируем в секунды
+                if unit in ['секунд', 'сек']:
+                    seconds = amount
+                elif unit in ['минут', 'мин']:
+                    seconds = amount * 60
+                elif unit in ['час', 'часа', 'часов']:
+                    seconds = amount * 3600
+                else:
+                    continue
+                
+                # Ограничение: максимум 24 часа
+                if seconds > 86400:
+                    return None
+                
+                return {
+                    'seconds': seconds,
+                    'amount': amount,
+                    'unit': unit,
+                    'text': reminder_text.strip() if reminder_text else None,
+                    'original': text
+                }
+                    
+        return None
+
+
 
     def tokenize(self, text: str) -> List[str]:
         """Токенизация текста"""

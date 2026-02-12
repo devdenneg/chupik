@@ -12,6 +12,7 @@ class KnowledgeManager:
         self.data_file = data_file
         self.facts: Dict[str, List[Dict]] = {}
         self.user_info: Dict[int, Dict] = {}  # Персональная информация по user_id
+        self.behavioral_rules: Dict[int, List[Dict]] = {}  # Поведенческие правила по chat_id
         self.load_knowledge()
 
     def load_knowledge(self):
@@ -22,10 +23,14 @@ class KnowledgeManager:
                     data = json.load(f)
                     self.facts = data.get('facts', {})
                     self.user_info = data.get('user_info', {})
+                    # Загружаем поведенческие правила, конвертируя ключи обратно в int
+                    behavioral_rules_raw = data.get('behavioral_rules', {})
+                    self.behavioral_rules = {int(k): v for k, v in behavioral_rules_raw.items()}
             except Exception as e:
                 print(f"Ошибка загрузки знаний: {e}")
                 self.facts = {}
                 self.user_info = {}
+                self.behavioral_rules = {}
 
     def save_knowledge(self):
         """Сохранение знаний в файл"""
@@ -33,6 +38,7 @@ class KnowledgeManager:
             data = {
                 'facts': self.facts,
                 'user_info': self.user_info,
+                'behavioral_rules': self.behavioral_rules,
                 'last_updated': datetime.now().isoformat(),
                 'total_facts': self.get_total_count()
             }
@@ -144,19 +150,49 @@ class KnowledgeManager:
 
         return None
 
-    def search_facts(self, query: str) -> List[Dict]:
-        """Поиск фактов по запросу"""
+    def search_facts(self, query: str, limit: int = 10) -> List[Dict]:
+        """Поиск фактов по запросу с ранжированием по релевантности
+        
+        Args:
+            query: Поисковый запрос
+            limit: Максимальное количество результатов
+            
+        Returns:
+            Список словарей с ключами, фактами и релевантностью
+        """
         query = query.lower().strip()
         results = []
 
         for key, facts in self.facts.items():
-            if query in key or query in str(facts).lower():
+            key_lower = key.lower()
+            relevance = 0
+            
+            # Точное совпадение ключа
+            if query == key_lower:
+                relevance = 100
+            # Ключ содержит запрос
+            elif query in key_lower:
+                relevance = 50
+            # Запрос содержит ключ
+            elif key_lower in query:
+                relevance = 30
+            
+            # Проверяем совпадения в фактах
+            for fact in facts:
+                fact_text = fact.get('fact', '').lower()
+                if query in fact_text:
+                    relevance += 10
+            
+            if relevance > 0:
                 results.append({
                     'key': key,
-                    'facts': facts
+                    'facts': facts,
+                    'relevance': relevance
                 })
 
-        return results
+        # Сортируем по релевантности
+        results.sort(key=lambda x: x['relevance'], reverse=True)
+        return results[:limit]
 
     def get_all_facts(self) -> Dict[str, List[Dict]]:
         """Получить все факты"""
@@ -178,8 +214,12 @@ class KnowledgeManager:
 
         return False
 
-    def get_context_for_prompt(self) -> str:
-        """Получить контекст из фактов для добавления в промпт"""
+    def get_context_for_prompt(self, query: str = "") -> str:
+        """Получить контекст из фактов для добавления в промпт
+        
+        Args:
+            query: Поисковый запрос для фильтрации релевантных фактов
+        """
         if not self.facts:
             return ""
 
@@ -189,23 +229,68 @@ class KnowledgeManager:
             for fact in fact_list[-3:]:  # Берем последние 3 для каждого ключа
                 all_facts.append({
                     'key': key,
-                    'fact': fact
+                    'fact': fact,
+                    'relevance': 0
                 })
 
-        # Сортируем по времени (самые свежие первые)
-        all_facts.sort(key=lambda x: x['fact'].get('timestamp', ''), reverse=True)
+        # Если есть запрос, ищем релевантные факты
+        if query:
+            query_lower = query.lower()
+            for item in all_facts:
+                key_lower = item['key'].lower()
+                fact_text_lower = item['fact']['fact'].lower()
+                
+                # Подсчитываем релевантность
+                relevance = 0
+                for word in query_lower.split():
+                    if len(word) > 2:  # Игнорируем короткие слова
+                        if word in key_lower:
+                            relevance += 3  # Ключ более важен
+                        if word in fact_text_lower:
+                            relevance += 1
+                
+                item['relevance'] = relevance
+            
+            # Сортируем по релевантности, затем по времени
+            all_facts.sort(key=lambda x: (x['relevance'], x['fact'].get('timestamp', '')), reverse=True)
+            # Берем топ 50 релевантных + 50 последних
+            relevant_facts = [f for f in all_facts if f['relevance'] > 0][:50]
+            recent_facts = sorted(all_facts, key=lambda x: x['fact'].get('timestamp', ''), reverse=True)[:50]
+            
+            # Объединяем и убираем дубликаты
+            combined = {id(f): f for f in relevant_facts + recent_facts}
+            facts_to_show = list(combined.values())[:100]
+        else:
+            # Сортируем по времени (самые свежие первые)
+            all_facts.sort(key=lambda x: x['fact'].get('timestamp', ''), reverse=True)
+            facts_to_show = all_facts[:100]
 
-        # Берем последние 100 фактов
-        recent_facts = all_facts[:100]
+        if not facts_to_show:
+            return ""
 
-        context = "\n\nКОНТЕКСТ ИЗ ПРЕДЫДУЩИХ СООБЩЕНИЙ (последние 100):\n"
+        context = "\n\n=== ВАЖНО: СОХРАНЕННЫЕ ФАКТЫ И ПАМЯТЬ ===\n"
+        context += "Ниже находится информация, которую пользователи СПЕЦИАЛЬНО попросили тебя запомнить через команду /learn.\n"
+        context += "ТЫ ОБЯЗАН использовать эти факты при ответах на вопросы!\n"
+        context += "Если пользователь спрашивает о чем-то из этого списка - отвечай на основе ЭТИХ данных.\n\n"
 
-        for item in recent_facts:
-            username = item['fact'].get('username', 'Unknown')
-            timestamp = item['fact'].get('timestamp', '')[:10]
-            fact_text = item['fact']['fact'][:100]  # Ограничиваем длину
-            context += f"[{timestamp}] @{username}: {fact_text}\n"
+        # Группируем по ключам для лучшей читаемости
+        facts_by_key = {}
+        for item in facts_to_show:
+            key = item['key']
+            if key not in facts_by_key:
+                facts_by_key[key] = []
+            facts_by_key[key].append(item['fact'])
 
+        for key, fact_list in facts_by_key.items():
+            context += f"📌 Ключ: '{key}'\n"
+            for fact in fact_list:
+                username = fact.get('username', 'Unknown')
+                timestamp = fact.get('timestamp', '')[:10]
+                fact_text = fact['fact']
+                context += f"   └─ [{timestamp}] @{username}: {fact_text}\n"
+            context += "\n"
+
+        context += "=== КОНЕЦ СОХРАНЕННЫХ ФАКТОВ ===\n"
         return context
 
     def save_user_info(self, user_id: int, info_type: str, value: str, username: str = None):
@@ -296,3 +381,93 @@ class KnowledgeManager:
             'usage_percent': round((total_facts / self.MAX_FACTS) * 100, 2),
             'top_contributors': top_contributors
         }
+
+    def add_behavioral_rule(self, chat_id: int, rule: str, user_id: int, username: str = None) -> bool:
+        """Добавить поведенческое правило для чата
+        
+        Args:
+            chat_id: ID чата
+            rule: Текст правила (например, 'начинай сообщения со слов Абудаби')
+            user_id: ID пользователя, который добавил правило
+            username: Имя пользователя
+            
+        Returns:
+            True если правило добавлено успешно
+        """
+        if chat_id not in self.behavioral_rules:
+            self.behavioral_rules[chat_id] = []
+        
+        rule_data = {
+            'rule': rule,
+            'added_by': user_id,
+            'username': username,
+            'timestamp': datetime.now().isoformat(),
+            'active': True
+        }
+        
+        self.behavioral_rules[chat_id].append(rule_data)
+        self.save_knowledge()
+        return True
+    
+    def get_behavioral_rules(self, chat_id: int) -> List[Dict]:
+        """Получить активные поведенческие правила для чата
+        
+        Args:
+            chat_id: ID чата
+            
+        Returns:
+            Список активных правил
+        """
+        if chat_id not in self.behavioral_rules:
+            return []
+        
+        # Возвращаем только активные правила
+        return [rule for rule in self.behavioral_rules[chat_id] if rule.get('active', True)]
+    
+    def remove_behavioral_rule(self, chat_id: int, rule_index: int) -> bool:
+        """Удалить поведенческое правило
+        
+        Args:
+            chat_id: ID чата
+            rule_index: Индекс правила (начиная с 0)
+            
+        Returns:
+            True если правило удалено успешно
+        """
+        if chat_id not in self.behavioral_rules:
+            return False
+        
+        if 0 <= rule_index < len(self.behavioral_rules[chat_id]):
+            self.behavioral_rules[chat_id][rule_index]['active'] = False
+            self.save_knowledge()
+            return True
+        
+        return False
+    
+    def get_behavioral_context(self, chat_id: int) -> str:
+        """Получить контекст с поведенческими правилами для промпта
+        
+        Args:
+            chat_id: ID чата
+            
+        Returns:
+            Строка с правилами для добавления в промпт
+        """
+        rules = self.get_behavioral_rules(chat_id)
+        
+        if not rules:
+            return ""
+        
+        context = "\n\n=== КРИТИЧЕСКИ ВАЖНО: ПОВЕДЕНЧЕСКИЕ ПРАВИЛА ===\n"
+        context += "Пользователи ПРИКАЗАЛИ тебе следовать этим правилам при КАЖДОМ ответе:\n\n"
+        
+        for i, rule_data in enumerate(rules, 1):
+            rule = rule_data['rule']
+            username = rule_data.get('username', 'Unknown')
+            timestamp = rule_data.get('timestamp', '')[:10]
+            context += f"{i}. [{timestamp}] @{username} приказал: {rule}\n"
+        
+        context += "\nТЫ ОБЯЗАН СЛЕДОВАТЬ ЭТИМ ПРАВИЛАМ В КАЖДОМ СВОЕМ ОТВЕТЕ!\n"
+        context += "=== КОНЕЦ ПОВЕДЕНЧЕСКИХ ПРАВИЛ ===\n"
+        
+        return context

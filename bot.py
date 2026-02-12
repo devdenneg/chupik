@@ -65,6 +65,10 @@ casino_manager = CasinoManager()
 chat_locks = defaultdict(asyncio.Lock)
 chat_queues = defaultdict(asyncio.Queue)
 
+# Хранилище для фоновых задач (напоминания и т.д.), чтобы они не были удалены сборщиком мусора
+background_tasks = set()
+
+
 # Рейтинг-система: каждый пользователь может получить очки независимо
 # Нет cooldown - каждое сообщение имеет 25% шанс на рандомное количество очков (1-25)
 
@@ -96,6 +100,81 @@ def needs_web_search(text: str) -> bool:
         if marker in text_lower:
             return True
     return False
+
+
+async def send_reminder(application, chat_id: int, user_id: int, username: str, seconds: int, reminder_text: str, original_request: str):
+    """
+    Отправить напоминание через указанное время с AI-генерацией персонализированного сообщения
+    """
+    try:
+        logger.info(f"[REMINDER] Scheduled for {seconds}s, chat={chat_id}, user={username}, text='{reminder_text}'")
+        
+        # Ждем указанное время
+        await asyncio.sleep(seconds)
+        
+        logger.info(f"[REMINDER] Time elapsed! Generating message for chat {chat_id}")
+        
+        # Генерируем персонализированное напоминание с помощью AI
+        user_name = knowledge_manager.get_user_name(user_id) or username or "друг"
+        
+        # Формируем промпт для AI
+        if reminder_text:
+            ai_prompt = f"""Ты - Чупапи, веселый и дружелюбный бот. Пользователь {user_name} попросил напомнить про: "{reminder_text}".
+
+Создай КОРОТКОЕ (1-2 предложения) напоминание в своем стиле:
+- Используй эмодзи
+- Будь дружелюбным и немного игривым
+- Упомяни о чем напомнить
+- Не используй слишком много восклицательных знаков
+
+Пример: "Эй, {user_name}! Ты просил напомнить про встречу. Время пришло! 😉"
+
+Твое напоминание:"""
+        else:
+            ai_prompt = f"""Ты - Чупапи, веселый и дружелюбный бот. Пользователь {user_name} попросил просто напомнить через некоторое время.
+
+Создай КОРОТКОЕ (1-2 предложения) напоминание в своем стиле:
+- Используй эмодзи
+- Будь дружелюбным и немного игривым
+- Напомни что время вышло
+- Не используй слишком много восклицательных знаков
+
+Пример: "Привет, {user_name}! Ты просил напомнить - вот и напоминаю! ⏰"
+
+Твое напоминание:"""
+        
+        try:
+            # Генерируем ответ через AI
+            ai_response = await glm_client.generate_response(
+                prompt=ai_prompt,
+                history=[],
+                max_tokens=100,
+                temperature=0.9
+            )
+            reminder_message = ai_response.strip()
+            logger.info(f"[REMINDER] AI generated: {reminder_message[:50]}...")
+        except Exception as e:
+            logger.error(f"Error generating AI reminder: {e}")
+            # Fallback на простое напоминание
+            if reminder_text:
+                reminder_message = f"⏰ Эй, {user_name}! Напоминаю про: {reminder_text} 😉"
+            else:
+                reminder_message = f"⏰ {user_name}, ты просил напомнить - вот и напоминаю! 👋"
+            logger.info(f"[REMINDER] Using fallback message")
+        
+        
+        logger.info(f"[REMINDER] Sending to chat {chat_id}...")
+        bot = application.bot
+        await bot.send_message(
+            chat_id=chat_id,
+            text=reminder_message
+        )
+        
+        logger.info(f"[REMINDER] ✅ Successfully sent to chat {chat_id} for user {username}")
+        
+    except Exception as e:
+        logger.error(f"[REMINDER] ❌ Error: {e}", exc_info=True)
+
 
 
 def is_complex_task(text: str) -> bool:
@@ -605,6 +684,75 @@ async def myinfo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await message.reply_text(response, parse_mode='HTML')
 
 
+async def rules_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать активные поведенческие правила"""
+    message = update.message
+    chat_id = update.effective_chat.id
+    
+    rules = knowledge_manager.get_behavioral_rules(chat_id)
+    
+    if not rules:
+        await message.reply_text(
+            "📋 <b>Поведенческие правила</b>\n\n"
+            "У меня пока нет специальных правил поведения для этого чата.\n\n"
+            "Вы можете задать правило, например:\n"
+            "• <code>Чупапи, начинай говорить со слов Абудаби</code>\n"
+            "• <code>Чупик, всегда добавляй эмодзи 🔥 в конце</code>\n"
+            "• <code>Чупа, отвечай только короткими фразами</code>",
+            parse_mode='HTML'
+        )
+        return
+    
+    response = f"📋 <b>Активные поведенческие правила:</b>\n\n"
+    
+    for i, rule_data in enumerate(rules, 1):
+        rule = rule_data['rule']
+        username = rule_data.get('username', 'Unknown')
+        timestamp = rule_data.get('timestamp', '')[:10]
+        response += f"{i}. [{timestamp}] @{username}:\n   <code>{rule}</code>\n\n"
+    
+    response += "\n💡 Чтобы удалить правило, используйте: <code>/forget_rule номер</code>"
+    
+    await message.reply_text(response, parse_mode='HTML')
+
+
+async def forget_rule_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Удалить поведенческое правило"""
+    message = update.message
+    chat_id = update.effective_chat.id
+    
+    if not context.args or len(context.args) == 0:
+        await message.reply_text(
+            "🗑️ <b>Как удалить правило:</b>\n\n"
+            "Используйте: <code>/forget_rule номер</code>\n\n"
+            "Посмотреть номера правил: <code>/rules</code>",
+            parse_mode='HTML'
+        )
+        return
+    
+    try:
+        rule_index = int(context.args[0]) - 1  # Пользователь вводит 1-based, конвертируем в 0-based
+    except ValueError:
+        await message.reply_text("❌ Укажите номер правила (число)", parse_mode='HTML')
+        return
+    
+    success = knowledge_manager.remove_behavioral_rule(chat_id, rule_index)
+    
+    if success:
+        await message.reply_text(
+            f"✅ Правило #{rule_index + 1} удалено!\n\n"
+            f"Теперь я не буду следовать этому правилу.",
+            parse_mode='HTML'
+        )
+    else:
+        await message.reply_text(
+            f"❌ Не удалось найти правило #{rule_index + 1}.\n\n"
+            f"Проверьте номер командой <code>/rules</code>",
+            parse_mode='HTML'
+        )
+
+
+
 async def track_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Отслеживание участников во всех сообщениях"""
     message = update.message
@@ -831,6 +979,55 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, us
         settings_manager.update_setting(chat_id, "custom_persona", new_persona)
         await message.reply_text(f"Принято! Теперь я — {new_persona}. Посмотрим, как это у меня получится! 😉🎭")
         return
+    
+    # Проверка на поведенческую инструкцию
+    behavioral_instruction = smart_ai.detect_behavioral_instruction(user_text)
+    if behavioral_instruction:
+        knowledge_manager.add_behavioral_rule(chat_id, behavioral_instruction, user.id, username)
+        await message.reply_text(f"✅ Запомнил! Теперь буду: {behavioral_instruction}\n\nПроверь - спроси меня что-нибудь! 😉")
+        return
+    
+    # Проверка на запрос напоминания
+    logger.info(f"[DEBUG] Checking for reminder in message: '{user_text[:50]}...'")
+    reminder_request = smart_ai.detect_reminder_request(user_text)
+    logger.info(f"[DEBUG] Reminder detection result: {reminder_request}")
+    if reminder_request:
+        seconds = reminder_request['seconds']
+        amount = reminder_request['amount']
+        unit = reminder_request['unit']
+        reminder_text = reminder_request['text']
+        
+        # Формируем единицу времени для отображения
+        if unit in ['секунд', 'сек']:
+            time_unit = 'секунд' if amount > 1 else 'секунду'
+        elif unit in ['минут', 'мин']:
+            time_unit = 'минут' if amount > 1 else 'минуту'
+        else:
+            time_unit = 'час' if amount == 1 else ('часа' if amount < 5 else 'часов')
+        
+        # Подтверждение
+        what_to_remind = f" про '{reminder_text}'" if reminder_text else ""
+        await message.reply_text(
+            f"⏰ Окей, напомню через {amount} {time_unit}{what_to_remind}! 👌"
+        )
+        
+        # Планируем напоминание
+        task = asyncio.create_task(send_reminder(
+            context.application,
+            chat_id,
+            user.id,
+            username,
+            seconds,
+            reminder_text,
+            user_text
+        ))
+        # Сохраняем ссылку на задачу, чтобы она не была удалена сборщиком мусора
+        background_tasks.add(task)
+        # Удаляем задачу из set после завершения
+        task.add_done_callback(background_tasks.discard)
+        
+        logger.info(f"[REMINDER] Task created and tracked for chat {chat_id}")
+        return
 
     # Если пользователь просит найти что-то в интернете - честно говорим что не умеем
     if needs_web_search(user_text):
@@ -853,7 +1050,7 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, us
             await message.reply_text(local_response)
             return
 
-    knowledge_context = knowledge_manager.get_context_for_prompt()
+    knowledge_context = knowledge_manager.get_context_for_prompt(user_text)
     user_context = knowledge_manager.get_user_context(user.id)
     user_name = knowledge_manager.get_user_name(user.id)
 
@@ -874,8 +1071,11 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, us
     # 🌍 Добавляем контекст настроения и времени суток
     mood_context = mood_manager.get_mood_prompt_context(chat_id)
     time_context = get_time_context()
+    
+    # 🧠 Добавляем поведенческие правила
+    behavioral_context = knowledge_manager.get_behavioral_context(chat_id)
 
-    enhanced_prompt = SYSTEM_PROMPT + style_instruction + persona_instruction + "\n" + mood_context + "\n" + time_context + "\n" + user_context + "\n" + knowledge_context
+    enhanced_prompt = SYSTEM_PROMPT + style_instruction + persona_instruction + "\n" + mood_context + "\n" + time_context + "\n" + behavioral_context + "\n" + user_context + "\n" + knowledge_context
 
     try:
         # Оптимизация контекста: отправляем только последние 10-12 сообщений для экономии токенов
@@ -1911,6 +2111,8 @@ async def post_init(application: Application):
         BotCommand("learn", "Обучить бота 🧠"),
         BotCommand("facts", "Что бот запомнил 📋"),
         BotCommand("myinfo", "Что бот знает о вас 👤"),
+        BotCommand("rules", "Поведенческие правила 📜"),
+        BotCommand("forget_rule", "Удалить правило 🗑️"),
         BotCommand("members", "Список участников 👥"),
         BotCommand("stats", "Статистика активности 📈"),
         BotCommand("rating", "Рейтинг пользователей 🏆"),
@@ -1973,6 +2175,8 @@ def main():
     application.add_handler(CommandHandler("forget", forget_command))
     application.add_handler(CommandHandler("facts", facts_command))
     application.add_handler(CommandHandler("myinfo", myinfo_command))
+    application.add_handler(CommandHandler("rules", rules_command))
+    application.add_handler(CommandHandler("forget_rule", forget_rule_command))
     application.add_handler(CommandHandler("settings", settings_command))
     application.add_handler(CommandHandler("rating", rating_command))
     application.add_handler(CommandHandler("level", level_command))
