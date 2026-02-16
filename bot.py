@@ -915,20 +915,20 @@ async def check_rating_request(update: Update, user_text: str, chat_id: int, use
 async def evaluate_message(update: Update, user_text: str, username: str, chat_id: int, user_id: int):
     """
     Простая вероятностная система рейтинга.
-    Каждое сообщение имеет 25% шанс получить от 1 до 25 очков.
+    Каждое сообщение имеет 10% шанс получить от 1 до 25 очков.
     Без использования AI.
     """
     try:
         logger.info(f"[RATING] Processing message from {username} (user_id={user_id}) in chat {chat_id}")
 
-        # Проверяем 25% вероятность
+        # Проверяем 10% вероятность
         rand_value = random.random()
-        logger.info(f"[RATING] Random check: {rand_value:.4f} < 0.25? {rand_value < 0.25}")
+        logger.info(f"[RATING] Random check: {rand_value:.4f} < 0.10? {rand_value < 0.10}")
 
-        if rand_value < 0.25:
+        if rand_value < 0.10:
             # Награждаем случайным количеством очков от 1 до 25
             points = random.randint(1, 25)
-            logger.info(f"[RATING] 25% check PASSED - granting {points} points!")
+            logger.info(f"[RATING] 10% check PASSED - granting {points} points!")
 
             rating_manager.add_rating(
                 chat_id, user_id, username,
@@ -961,33 +961,33 @@ async def evaluate_message(update: Update, user_text: str, username: str, chat_i
         logger.error(f"[RATING] Error: {e}", exc_info=True)
 
 
-async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, user_text: str, username: str):
-    """Обработка сообщения с генерацией ответа"""
-    chat_id = update.effective_chat.id
-    message = update.message
-    user = message.from_user
-
-    chat_history = history_manager.get_history(chat_id)[:-1]
-
-    # Проверка на смену личности
+async def handle_persona_change(message, user_text: str, chat_id: int) -> bool:
+    """Обработка смены личности"""
     new_persona, is_reset = smart_ai.detect_persona_change(user_text)
     if is_reset:
         settings_manager.update_setting(chat_id, "custom_persona", None)
+        history_manager.clear_history(chat_id)
         await message.reply_text("Хорошо, возвращаюсь в свой обычный облик! Чупапи снова в здании! 😎✨")
-        return
+        return True
     elif new_persona:
         settings_manager.update_setting(chat_id, "custom_persona", new_persona)
         await message.reply_text(f"Принято! Теперь я — {new_persona}. Посмотрим, как это у меня получится! 😉🎭")
-        return
-    
-    # Проверка на поведенческую инструкцию
+        return True
+    return False
+
+
+async def handle_behavioral_instruction(message, user_text: str, chat_id: int, user_id: int, username: str) -> bool:
+    """Обработка поведенческих инструкций"""
     behavioral_instruction = smart_ai.detect_behavioral_instruction(user_text)
     if behavioral_instruction:
-        knowledge_manager.add_behavioral_rule(chat_id, behavioral_instruction, user.id, username)
+        knowledge_manager.add_behavioral_rule(chat_id, behavioral_instruction, user_id, username)
         await message.reply_text(f"✅ Запомнил! Теперь буду: {behavioral_instruction}\n\nПроверь - спроси меня что-нибудь! 😉")
-        return
-    
-    # Проверка на запрос напоминания
+        return True
+    return False
+
+
+async def handle_reminder_request(message, context: ContextTypes.DEFAULT_TYPE, user_text: str, chat_id: int, user_id: int, username: str) -> bool:
+    """Обработка запросов на напоминание"""
     logger.info(f"[DEBUG] Checking for reminder in message: '{user_text[:50]}...'")
     reminder_request = smart_ai.detect_reminder_request(user_text)
     logger.info(f"[DEBUG] Reminder detection result: {reminder_request}")
@@ -1015,7 +1015,7 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, us
         task = asyncio.create_task(send_reminder(
             context.application,
             chat_id,
-            user.id,
+            user_id,
             username,
             seconds,
             reminder_text,
@@ -1027,6 +1027,28 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, us
         task.add_done_callback(background_tasks.discard)
         
         logger.info(f"[REMINDER] Task created and tracked for chat {chat_id}")
+        return True
+    return False
+
+
+async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, user_text: str, username: str):
+    """Обработка сообщения с генерацией ответа"""
+    chat_id = update.effective_chat.id
+    message = update.message
+    user = message.from_user
+
+    chat_history = history_manager.get_history(chat_id)[:-1]
+
+    # 1. Проверка на смену личности
+    if await handle_persona_change(message, user_text, chat_id):
+        return
+
+    # 2. Проверка на поведенческую инструкцию
+    if await handle_behavioral_instruction(message, user_text, chat_id, user.id, username):
+        return
+
+    # 3. Проверка на запрос напоминания
+    if await handle_reminder_request(message, context, user_text, chat_id, user.id, username):
         return
 
     # Если пользователь просит найти что-то в интернете - честно говорим что не умеем
@@ -1367,6 +1389,7 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "set_persona_reset":
         settings_manager.update_setting(chat_id, "custom_persona", None)
+        history_manager.clear_history(chat_id)
         await query.answer("Личность сброшена на Чупапи! ✅")
         await settings_persona_menu(query, chat_id)
 
@@ -1690,55 +1713,11 @@ async def daily_stats_scheduler(application: Application):
             await asyncio.sleep(sleep_seconds)
 
             # Отправляем статистику только в группы (не в личные сообщения)
+            # Отправляем статистику только в группы (не в личные сообщения)
             for chat_id_str in list(history_manager.chats.keys()):
                 chat_id = int(chat_id_str)
-
-                if not is_chat_allowed(chat_id):
-                    continue
-
-                # Проверяем тип чата - отправляем только в группы
-                try:
-                    chat = await application.bot.get_chat(chat_id)
-                    if chat.type == 'private':
-                        continue  # Пропускаем личные чаты
-                except Exception as e:
-                    logger.warning(f"Could not get chat info for {chat_id}: {e}")
-                    continue
-
-                stats = daily_stats.get_today_stats(chat_id)
-                messages_count = stats.get("messages", 0)
-                rating_points = stats.get("rating_points", 0)
-
-                # Генерируем статистику в стиле Чупапи через GLM
-                prompt = [
-                    {"role": "system", "content": SYSTEM_PERSONA + f"\n\nСейчас полночь, день закончился. Ты подводишь итоги дня в чате. Будь в своем стиле - дерзким, живым, используй сленг и эмодзи. Напиши короткий (2-3 предложения) отчет о дне.\n\nДанные за день:\n- Сообщений написано: {messages_count}\n- Очков рейтинга начислено: {rating_points}"},
-                    {"role": "user", "content": "Подведи итоги дня в своем стиле, используя эти цифры"}
-                ]
-
-                try:
-                    stats_message = await glm_client.chat_completion(prompt, max_tokens=150, temperature=0.8)
-
-                    if stats_message:
-                        await application.bot.send_message(
-                            chat_id=chat_id,
-                            text=stats_message
-                        )
-                        logger.info(f"Daily stats sent to chat {chat_id}: {messages_count} messages, {rating_points} rating points")
-                    else:
-                        # Fallback если GLM не ответил
-                        fallback = (
-                            f"Йоу! День прошел огонь! 🔥\n\n"
-                            f"Сегодня вы написали {messages_count} сообщений и заработали {rating_points} очков! "
-                            f"Завтра еще круче будет, я чувствую! 💪"
-                        )
-                        await application.bot.send_message(
-                            chat_id=chat_id,
-                            text=fallback
-                        )
-                except Exception as e:
-                    logger.error(f"Error sending daily stats to chat {chat_id}: {e}")
-
-                # Сбрасываем счетчики после отправки
+                
+                # Отключаем отправку статистики, только сбрасываем счетчики
                 daily_stats.reset_today_stats(chat_id)
 
         except Exception as e:
@@ -2009,15 +1988,21 @@ async def roulette_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text(
             "🎰 <b>Казино-рулетка</b>\n\n"
-            "Использование: /roulette <ставка>\n"
+            "Использование: /roulette <ставка> [множитель]\n"
             f"Минимальная ставка: {casino_manager.MIN_BET} очко\n"
             "Максимальная ставка: весь твой рейтинг!\n\n"
-            "<b>Множители:</b>\n"
+            "<b>Режим 1: Случайный множитель</b>\n"
+            "/roulette 100 - ставка 100 очков\n"
             "💥 x0 (проигрыш) - 40%\n"
             "🎉 x2 (удвоение) - 35%\n"
             "🔥 x3 (утроение) - 15%\n"
             "💎 x5 - 7%\n"
             "🌟 x10 - 3%\n\n"
+            "<b>Режим 2: Выбор множителя</b>\n"
+            "/roulette 100 2 - ставка 100 на x2 (45% шанс)\n"
+            "/roulette 100 3 - ставка 100 на x3 (30% шанс)\n"
+            "/roulette 100 5 - ставка 100 на x5 (15% шанс)\n"
+            "/roulette 100 10 - ставка 100 на x10 (5% шанс)\n\n"
             "Посмотреть статистику: /casinostats",
             parse_mode='HTML'
         )
@@ -2029,6 +2014,15 @@ async def roulette_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text("⚠️ Укажи ставку числом! Например: /roulette 10")
         return
+    
+    # Проверяем, указан ли множитель
+    target_multiplier = None
+    if len(context.args) >= 2:
+        try:
+            target_multiplier = int(context.args[1])
+        except ValueError:
+            await update.message.reply_text("⚠️ Множитель должен быть числом! Доступны: 2, 3, 5, 10")
+            return
 
     # Получаем текущий рейтинг
     user_rating = rating_manager.get_user_rating(chat_id, user_id)
@@ -2041,9 +2035,16 @@ async def roulette_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Играем!
-    success, multiplier, result, message = casino_manager.play(
-        chat_id, user_id, bet, user_rating
-    )
+    if target_multiplier:
+        # Игра с выбранным множителем
+        success, multiplier, result, message = casino_manager.play_with_multiplier(
+            chat_id, user_id, bet, user_rating, target_multiplier
+        )
+    else:
+        # Обычная игра со случайным множителем
+        success, multiplier, result, message = casino_manager.play(
+            chat_id, user_id, bet, user_rating
+        )
 
     if not success:
         # Ошибка (кулдаун, недостаточно очков и т.д.)
@@ -2061,10 +2062,11 @@ async def roulette_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Формируем ответ с анимацией
     animation = " ".join(casino_manager.SPIN_ANIMATION)
+    mode_text = f"(целевой x{target_multiplier})" if target_multiplier else "(случайный)"
     full_message = (
         f"🎰 <b>РУЛЕТКА</b>\n\n"
         f"👤 {username}\n"
-        f"💰 Ставка: <b>{bet}</b> очков\n\n"
+        f"💰 Ставка: <b>{bet}</b> очков {mode_text}\n\n"
         f"{animation}\n\n"
         f"{message}\n\n"
         f"⭐ Новый рейтинг: <b>{new_rating}</b> очков"
@@ -2086,9 +2088,20 @@ async def casinostats_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     if not is_chat_allowed(chat_id):
         return
-
-    stats = casino_manager.get_stats(chat_id, user_id)
-    message = casino_manager.format_stats(stats)
+    
+    # Проверяем, запрашивается ли глобальная статистика
+    show_global = len(context.args) > 0 and context.args[0].lower() in ['global', 'общая', 'all']
+    
+    if show_global:
+        # Показываем глобальную статистику
+        message = casino_manager.format_global_stats()
+    else:
+        # Показываем личную статистику
+        stats = casino_manager.get_stats(chat_id, user_id)
+        personal_message = casino_manager.format_stats(stats)
+        
+        # Добавляем подсказку про глобальную статистику
+        message = personal_message + "\n\n💡 Глобальная статистика: /casinostats global"
 
     await update.message.reply_text(message, parse_mode='HTML')
 
@@ -2098,9 +2111,10 @@ async def post_init(application: Application):
     # Запускаем фоновую задачу проверки молчания (manual loop)
     asyncio.create_task(silence_checker_loop(application))
     # Запускаем планировщик ежедневной статистики
+    # Запускаем планировщик ежедневной статистики
     asyncio.create_task(daily_stats_scheduler(application))
-    # Запускаем планировщик утреннего приветствия
-    asyncio.create_task(morning_greeting_scheduler(application))
+    # Запускаем планировщик утреннего приветствия (ОТКЛЮЧЕНО)
+    # asyncio.create_task(morning_greeting_scheduler(application))
 
 
     commands = [
